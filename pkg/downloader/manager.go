@@ -441,9 +441,47 @@ func (m *Manager) downloadAll(deps []*chart.Dependency) error {
 				getter.WithTagName(version))
 		}
 
-		if _, _, err = dl.DownloadTo(churl, version, tmpPath); err != nil {
+		// Download to repository cache first, then copy to tmpPath
+		// This allows subsequent builds to reuse from cache
+		cacheDest := m.RepositoryCache
+		if cacheDest == "" {
+			// If no cache configured, download directly to tmpPath
+			cacheDest = tmpPath
+		}
+
+		saved, _, err := dl.DownloadTo(churl, version, cacheDest)
+		if err != nil {
 			saveError = errors.Wrapf(err, "could not download %s", churl)
 			break
+		}
+
+		// If we downloaded to cache, copy to tmpPath
+		if cacheDest != tmpPath {
+			chartName := filepath.Base(saved)
+			tmpFile := filepath.Join(tmpPath, chartName)
+
+			src, err := os.Open(saved)
+			if err != nil {
+				saveError = errors.Wrapf(err, "could not open cached chart %s", saved)
+				break
+			}
+
+			dst, err := os.Create(tmpFile)
+			if err != nil {
+				src.Close()
+				saveError = errors.Wrapf(err, "could not create chart file %s", tmpFile)
+				break
+			}
+
+			if _, err := io.Copy(dst, src); err != nil {
+				src.Close()
+				dst.Close()
+				saveError = errors.Wrapf(err, "could not copy chart from cache")
+				break
+			}
+
+			src.Close()
+			dst.Close()
 		}
 
 		churls[churl] = struct{}{}
