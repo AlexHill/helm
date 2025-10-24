@@ -348,3 +348,89 @@ func TestScanReposForURL(t *testing.T) {
 		t.Fatalf("expected ErrNoOwnerRepo, got %v", err)
 	}
 }
+
+func TestFindRepoByURL(t *testing.T) {
+	repos := []*repo.Entry{
+		{
+			Name: "stable",
+			URL:  "https://charts.example.com/stable",
+		},
+		{
+			Name: "bitnami",
+			URL:  "https://charts.bitnami.com/bitnami",
+		},
+		{
+			Name: "local",
+			URL:  "http://localhost:8080/charts",
+		},
+	}
+
+	tests := []struct {
+		name     string
+		chartURL string
+		wantName string
+		wantErr  bool
+	}{
+		{
+			name:     "exact prefix match",
+			chartURL: "https://charts.example.com/stable/nginx-1.0.0.tgz",
+			wantName: "stable",
+			wantErr:  false,
+		},
+		{
+			name:     "exact prefix match with trailing slash",
+			chartURL: "https://charts.example.com/stable/nginx-1.0.0.tgz",
+			wantName: "stable",
+			wantErr:  false,
+		},
+		{
+			name:     "different repo",
+			chartURL: "https://charts.bitnami.com/bitnami/redis-1.0.0.tgz",
+			wantName: "bitnami",
+			wantErr:  false,
+		},
+		{
+			name:     "same host different path",
+			chartURL: "https://charts.example.com/other/nginx-1.0.0.tgz",
+			wantName: "stable",
+			wantErr:  false,
+		},
+		{
+			name:     "localhost",
+			chartURL: "http://localhost:8080/charts/mychart-1.0.0.tgz",
+			wantName: "local",
+			wantErr:  false,
+		},
+		{
+			name:     "not found",
+			chartURL: "https://charts.other.com/chart-1.0.0.tgz",
+			wantName: "",
+			wantErr:  true,
+		},
+		{
+			name:     "different scheme",
+			chartURL: "http://charts.example.com/stable/nginx-1.0.0.tgz",
+			wantName: "",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := findRepoByURL(tt.chartURL, repos)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("findRepoByURL() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if got == nil {
+					t.Error("findRepoByURL() returned nil repo")
+					return
+				}
+				if got.Name != tt.wantName {
+					t.Errorf("findRepoByURL() returned repo %v, want %v", got.Name, tt.wantName)
+				}
+			}
+		})
+	}
+}

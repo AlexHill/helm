@@ -179,16 +179,24 @@ func (c *ChartDownloader) ResolveChartVersion(ref, version string) (*url.URL, er
 		// we want to find the repo in case we have special SSL cert config
 		// for that repo.
 
-		rc, err := c.scanReposForURL(ref, rf)
+		// Try fast path first - simple URL matching
+		rc, err := findRepoByURL(ref, rf.Repositories)
 		if err != nil {
-			// If there is no special config, return the default HTTP client and
-			// swallow the error.
+			// Fast path didn't find it - try slow path for edge cases
+			// (e.g., charts served from CDN with different domain)
 			if err == ErrNoOwnerRepo {
-				// Make sure to add the ref URL as the URL for the getter
-				c.Options = append(c.Options, getter.WithURL(ref))
-				return u, nil
+				rc, err = c.scanReposForURL(ref, rf)
+				if err != nil {
+					if err == ErrNoOwnerRepo {
+						// Make sure to add the ref URL as the URL for the getter
+						c.Options = append(c.Options, getter.WithURL(ref))
+						return u, nil
+					}
+					return u, err
+				}
+			} else {
+				return u, err
 			}
-			return u, err
 		}
 
 		// If we get here, we don't need to go through the next phase of looking
@@ -316,6 +324,48 @@ func pickChartRepositoryConfigByName(name string, cfgs []*repo.Entry) (*repo.Ent
 		}
 	}
 	return nil, errors.Errorf("repo %s not found", name)
+}
+
+// findRepoByURL attempts to find a repository entry by matching the chart URL
+// against repository base URLs. This is much faster than scanning index files.
+// It handles the common case where chart URLs are prefixed with or share the
+// same host as the repository URL.
+func findRepoByURL(chartURL string, repos []*repo.Entry) (*repo.Entry, error) {
+	parsedURL, err := url.Parse(chartURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try exact prefix match first (most common case)
+	// This handles URLs like:
+	//   repo: https://charts.example.com/stable
+	//   chart: https://charts.example.com/stable/nginx-1.0.0.tgz
+	for _, rc := range repos {
+		// Normalize URLs for comparison (handle trailing slashes)
+		repoURL := strings.TrimSuffix(rc.URL, "/")
+		testURL := strings.TrimSuffix(chartURL, "/")
+
+		if strings.HasPrefix(testURL, repoURL) {
+			return rc, nil
+		}
+	}
+
+	// Try matching by scheme + host (handles different paths on same host)
+	// This handles URLs like:
+	//   repo: https://charts.example.com/stable
+	//   chart: https://charts.example.com/other/nginx-1.0.0.tgz
+	for _, rc := range repos {
+		repoURL, err := url.Parse(rc.URL)
+		if err != nil {
+			continue
+		}
+
+		if parsedURL.Scheme == repoURL.Scheme && parsedURL.Host == repoURL.Host {
+			return rc, nil
+		}
+	}
+
+	return nil, ErrNoOwnerRepo
 }
 
 // scanReposForURL scans all repos to find which repo contains the given URL.
