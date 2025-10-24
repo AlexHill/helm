@@ -135,7 +135,14 @@ func (m *Manager) Build() error {
 
 	if !m.SkipUpdate {
 		// For each repo in the file, update the cached copy of that repo
-		if err := m.UpdateRepositories(); err != nil {
+		// Only update repos that are actually used by dependencies
+		neededRepoURLs := make(map[string]bool)
+		for _, dep := range lock.Dependencies {
+			if dep.Repository != "" && !strings.HasPrefix(dep.Repository, "file://") && !strings.HasPrefix(dep.Repository, "oci://") {
+				neededRepoURLs[dep.Repository] = true
+			}
+		}
+		if err := m.UpdateRepositories(neededRepoURLs); err != nil {
 			return err
 		}
 	}
@@ -184,7 +191,14 @@ func (m *Manager) Update() error {
 	// For each of the repositories Helm is configured to know about, update
 	// the index information locally.
 	if !m.SkipUpdate {
-		if err := m.UpdateRepositories(); err != nil {
+		// Extract unique repository URLs from dependencies
+		neededRepoURLs := make(map[string]bool)
+		for _, dep := range req {
+			if dep.Repository != "" && !strings.HasPrefix(dep.Repository, "file://") && !strings.HasPrefix(dep.Repository, "oci://") {
+				neededRepoURLs[dep.Repository] = true
+			}
+		}
+		if err := m.UpdateRepositories(neededRepoURLs); err != nil {
 			return err
 		}
 	}
@@ -717,13 +731,27 @@ repository, use "https://charts.example.com/" or "@example" instead of
 }
 
 // UpdateRepositories updates all of the local repos to the latest.
-func (m *Manager) UpdateRepositories() error {
+func (m *Manager) UpdateRepositories(neededRepoURLs map[string]bool) error {
 	rf, err := loadRepoConfig(m.RepositoryConfig)
 	if err != nil {
 		return err
 	}
-	repos := rf.Repositories
+
+	// Filter repos to only those whose URLs are needed by dependencies
+	// Note: We don't deduplicate by URL because index files are cached by repo name,
+	// not by URL. If multiple repos point to the same URL, each needs its own index file.
+	var repos []*repo.Entry
+	for _, r := range rf.Repositories {
+		// Check if this repo's URL is needed
+		if neededRepoURLs[r.URL] {
+			repos = append(repos, r)
+		}
+	}
+
 	if len(repos) > 0 {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Updating %d/%d chart repositories (only those needed by dependencies)...\n", len(repos), len(rf.Repositories))
+		}
 		fmt.Fprintln(m.Out, "Hang tight while we grab the latest from your chart repositories...")
 		// This prints warnings straight to out.
 		if err := m.parallelRepoUpdate(repos); err != nil {
@@ -903,7 +931,9 @@ func (m *Manager) loadChartRepositories() (map[string]*repo.ChartRepository, err
 		idxFile := filepath.Join(m.RepositoryCache, helmpath.CacheIndexFile(lname))
 		index, err := repo.LoadIndexFile(idxFile)
 		if err != nil {
-			return indices, err
+			// Skip repositories whose index files don't exist (e.g., not updated yet)
+			// This allows the operation to proceed with only the repos that were updated
+			continue
 		}
 
 		// TODO: use constructor
