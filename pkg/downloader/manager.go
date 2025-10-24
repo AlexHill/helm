@@ -239,6 +239,74 @@ func (m *Manager) resolve(req []*chart.Dependency, repoNames map[string]string) 
 //
 // It will delete versions of the chart that exist on disk and might cause
 // a conflict.
+// getChartFromCache attempts to find and copy a chart from the repository cache.
+// Returns true if the chart was found and copied successfully, false otherwise.
+func (m *Manager) getChartFromCache(dep *chart.Dependency, destPath string) bool {
+	if m.RepositoryCache == "" {
+		return false
+	}
+
+	// Construct the expected filename in the cache
+	// Charts are stored as name-version.tgz
+	filename := fmt.Sprintf("%s-%s.tgz", dep.Name, dep.Version)
+	cachePath := filepath.Join(m.RepositoryCache, filename)
+
+	// Check if the file exists in cache
+	if _, err := os.Stat(cachePath); err != nil {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Chart %s not found in cache\n", filename)
+		}
+		return false
+	}
+
+	// Load the cached chart to verify it
+	ch, err := loader.LoadFile(cachePath)
+	if err != nil {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Failed to load cached chart %s: %v\n", filename, err)
+		}
+		return false
+	}
+
+	// Verify the chart name and version match
+	if ch.Metadata.Name != dep.Name || ch.Metadata.Version != dep.Version {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Cached chart metadata mismatch for %s\n", filename)
+		}
+		return false
+	}
+
+	// Copy the chart from cache to destination
+	destFile := filepath.Join(destPath, filename)
+	src, err := os.Open(cachePath)
+	if err != nil {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Failed to open cached chart %s: %v\n", cachePath, err)
+		}
+		return false
+	}
+	defer src.Close()
+
+	dst, err := os.Create(destFile)
+	if err != nil {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Failed to create destination file %s: %v\n", destFile, err)
+		}
+		return false
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		if m.Debug {
+			fmt.Fprintf(m.Out, "Failed to copy chart from cache: %v\n", err)
+		}
+		os.Remove(destFile)
+		return false
+	}
+
+	return true
+}
+
 func (m *Manager) downloadAll(deps []*chart.Dependency) error {
 	repos, err := m.loadChartRepositories()
 	if err != nil {
@@ -320,6 +388,13 @@ func (m *Manager) downloadAll(deps []*chart.Dependency) error {
 
 		if _, ok := churls[churl]; ok {
 			fmt.Fprintf(m.Out, "Already downloaded %s from repo %s\n", dep.Name, dep.Repository)
+			continue
+		}
+
+		// Try to get chart from local cache first
+		if m.getChartFromCache(dep, destPath) {
+			fmt.Fprintf(m.Out, "Using %s from cache\n", dep.Name)
+			churls[churl] = struct{}{}
 			continue
 		}
 

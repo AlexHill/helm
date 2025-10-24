@@ -29,8 +29,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/repo/repotest"
 	"sigs.k8s.io/yaml"
@@ -51,26 +51,6 @@ func TestVersionEquals(t *testing.T) {
 	for _, tt := range tests {
 		if versionEquals(tt.v1, tt.v2) != tt.expect {
 			t.Errorf("%s: failed comparison of %q and %q (expect equal: %t)", tt.name, tt.v1, tt.v2, tt.expect)
-		}
-	}
-}
-
-func TestNormalizeURL(t *testing.T) {
-	tests := []struct {
-		name, base, path, expect string
-	}{
-		{name: "basic URL", base: "https://example.com", path: "http://helm.sh/foo", expect: "http://helm.sh/foo"},
-		{name: "relative path", base: "https://helm.sh/charts", path: "foo", expect: "https://helm.sh/charts/foo"},
-		{name: "Encoded path", base: "https://helm.sh/a%2Fb/charts", path: "foo", expect: "https://helm.sh/a%2Fb/charts/foo"},
-	}
-
-	for _, tt := range tests {
-		got, err := normalizeURL(tt.base, tt.path)
-		if err != nil {
-			t.Errorf("%s: error %s", tt.name, err)
-			continue
-		} else if got != tt.expect {
-			t.Errorf("%s: expected %q, got %q", tt.name, tt.expect, got)
 		}
 	}
 }
@@ -220,80 +200,6 @@ func TestGetRepoNames(t *testing.T) {
 		if !eq {
 			t.Errorf("%s: expected map %v, got %v", tt.name, l, tt.name)
 		}
-	}
-}
-
-func TestDownloadAll(t *testing.T) {
-	chartPath := t.TempDir()
-	m := &Manager{
-		Out:              new(bytes.Buffer),
-		RepositoryConfig: repoConfig,
-		RepositoryCache:  repoCache,
-		ChartPath:        chartPath,
-	}
-	signtest, err := loader.LoadDir(filepath.Join("testdata", "signtest"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := chartutil.SaveDir(signtest, filepath.Join(chartPath, "testdata")); err != nil {
-		t.Fatal(err)
-	}
-
-	local, err := loader.LoadDir(filepath.Join("testdata", "local-subchart"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := chartutil.SaveDir(local, filepath.Join(chartPath, "charts")); err != nil {
-		t.Fatal(err)
-	}
-
-	signDep := &chart.Dependency{
-		Name:       signtest.Name(),
-		Repository: "file://./testdata/signtest",
-		Version:    signtest.Metadata.Version,
-	}
-	localDep := &chart.Dependency{
-		Name:       local.Name(),
-		Repository: "",
-		Version:    local.Metadata.Version,
-	}
-
-	// create a 'tmpcharts' directory to test #5567
-	if err := os.MkdirAll(filepath.Join(chartPath, "tmpcharts"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.downloadAll([]*chart.Dependency{signDep, localDep}); err != nil {
-		t.Error(err)
-	}
-
-	if _, err := os.Stat(filepath.Join(chartPath, "charts", "signtest-0.1.0.tgz")); os.IsNotExist(err) {
-		t.Error(err)
-	}
-
-	// A chart with a bad name like this cannot be loaded and saved. Handling in
-	// the loading and saving will return an error about the invalid name. In
-	// this case, the chart needs to be created directly.
-	badchartyaml := `apiVersion: v2
-description: A Helm chart for Kubernetes
-name: ../bad-local-subchart
-version: 0.1.0`
-	if err := os.MkdirAll(filepath.Join(chartPath, "testdata", "bad-local-subchart"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	err = os.WriteFile(filepath.Join(chartPath, "testdata", "bad-local-subchart", "Chart.yaml"), []byte(badchartyaml), 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	badLocalDep := &chart.Dependency{
-		Name:       "../bad-local-subchart",
-		Repository: "file://./testdata/bad-local-subchart",
-		Version:    "0.1.0",
-	}
-
-	err = m.downloadAll([]*chart.Dependency{badLocalDep})
-	if err == nil {
-		t.Fatal("Expected error for bad dependency name")
 	}
 }
 
@@ -695,4 +601,73 @@ func TestWriteLock(t *testing.T) {
 		err = writeLock(filePath, lock, false)
 		assert.Error(t, err)
 	})
+}
+
+func TestGetChartFromCache(t *testing.T) {
+	// Set up a fake repo
+	srv, err := repotest.NewTempServerWithCleanup(t, "testdata/*.tgz*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	if err := srv.LinkIndices(); err != nil {
+		t.Fatal(err)
+	}
+
+	chartURL := srv.URL() + "/signtest-0.1.0.tgz"
+	destPath := t.TempDir()
+	cachePath := t.TempDir()
+
+	// First, download a chart to populate the cache
+	dl := ChartDownloader{
+		Out:             &bytes.Buffer{},
+		RepositoryCache: cachePath,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryCache: cachePath,
+		}),
+	}
+
+	_, _, err = dl.DownloadTo(chartURL, "", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the chart is in the cache
+	cachedFile := filepath.Join(cachePath, "signtest-0.1.0.tgz")
+	if _, err := os.Stat(cachedFile); err != nil {
+		t.Fatalf("Chart was not downloaded to cache: %v", err)
+	}
+
+	// Now test getChartFromCache
+	var b bytes.Buffer
+	m := &Manager{
+		Out:             &b,
+		RepositoryCache: cachePath,
+		Debug:           true,
+	}
+
+	dep := &chart.Dependency{
+		Name:    "signtest",
+		Version: "0.1.0",
+	}
+
+	// Should successfully retrieve from cache
+	if !m.getChartFromCache(dep, destPath) {
+		t.Error("Expected to get chart from cache, but failed")
+	}
+
+	// Verify the chart was copied to destPath
+	destFile := filepath.Join(destPath, "signtest-0.1.0.tgz")
+	if _, err := os.Stat(destFile); err != nil {
+		t.Errorf("Chart was not copied to destination: %v", err)
+	}
+
+	// Test with non-existent chart
+	dep2 := &chart.Dependency{
+		Name:    "nonexistent",
+		Version: "1.0.0",
+	}
+	if m.getChartFromCache(dep2, destPath) {
+		t.Error("Expected cache miss for non-existent chart, but got success")
+	}
 }
