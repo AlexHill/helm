@@ -406,7 +406,7 @@ func (m *Manager) downloadAll(deps []*chart.Dependency) error {
 		}
 
 		// Try to get chart from local cache first
-		if m.getChartFromCache(dep, destPath) {
+		if m.getChartFromCache(dep, tmpPath) {
 			fmt.Fprintf(m.Out, "Using %s from cache\n", dep.Name)
 			churls[churl] = struct{}{}
 			continue
